@@ -1,0 +1,21 @@
+# experiments/<run_id>.yaml — one important Run. Introduce with the first important experiment.
+run_id: EXP-001
+protocol:
+  ref: research/PROTOCOL.md
+  version: v1
+code:
+  commit: null # from __RW_START__: commit=
+  dirty: null  # from __RW_START__: dirty= (yes means reproduce on committed code or flag it)
+  tree: null   # from __RW_START__: tree=
+data:
+  ref: null
+config:
+  ref: null
+environment:
+  host: null # remote host alias, e.g. from project.yaml remote.host
+  ref: null
+command: null
+artifacts: [] # paths under results/ or output/
+metrics: {}
+status: planned # planned | running | finished | failed | stopped
+evidence: [] # verified evidence paths, mirrored in meta/status.yaml

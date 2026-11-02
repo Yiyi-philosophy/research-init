@@ -1,0 +1,20 @@
+# Machine-readable current state (SSOT). docs/CURRENT.md is its view: update both in the same change.
+# Vocabulary: workflow/WORKFLOW.md §5. Checked by scripts/check-workflow.sh.
+phase: template # template | bootstrap | exploration | experimentation | closed
+current_objective: null
+artifacts:
+  proposal:
+    ref: research/PROPOSAL.md
+    status: not_started # not_started | draft | accepted
+    review:
+      status: NOT_STARTED
+      latest_review: null
+  protocol:
+    ref: research/PROTOCOL.md
+    status: not_started # not_started | draft | frozen | superseded
+    review:
+      status: NOT_STARTED
+      latest_review: null
+active_plan: null
+evidence: []
+next_action: run_project_init

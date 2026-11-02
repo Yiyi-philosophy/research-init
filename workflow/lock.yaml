@@ -1,0 +1,20 @@
+# Template-owned. Version of this research workflow template and its pinned upstream sources.
+workflow:
+  name: research-init
+  version: "0.6.0"
+  repository: https://github.com/Yiyi-philosophy/research-init
+  spec: workflow/WORKFLOW.md
+  changelog: workflow/CHANGELOG.md
+
+harness: claude-code # skills rely on Claude Code features (Skill discovery, Monitor tool)
+
+skills:
+  canonical_source: workflow/skills
+  discovery: .claude/skills
+  installer: scripts/install-agent-skills.sh
+  vendored: # provenance and local changes: workflow/skills/UPSTREAM.md
+    repository: https://github.com/mattpocock/skills
+    commit: d81f3a183412e71a5b1e84ca21bc1a35eea03a60
+    license: MIT
+    skills: [grilling, domain-modeling, grill-with-docs]
+  local: [resmon, remote-run, research-review, record-decision, project-init] # project-init deletes itself after bootstrap

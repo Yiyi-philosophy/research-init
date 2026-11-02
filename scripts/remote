@@ -1,0 +1,416 @@
+#!/usr/bin/env bash
+# remote: thin adapter for running and supervising long jobs on the project's remote compute host.
+# Configuration: project.yaml (section `remote`), overridable with RW_* environment variables.
+# Runbook: docs/REMOTE-COMPUTE.md. Supervision procedure: workflow/skills/remote-run/SKILL.md.
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+config="${RW_CONFIG:-$repo_root/project.yaml}"
+# shellcheck source=lib/project-config.sh
+source "$repo_root/scripts/lib/project-config.sh"
+cfg() { project_config_get "$config" "$@"; }
+
+slug="${RW_PROJECT_SLUG:-$(cfg project slug)}"
+host="${RW_HOST:-$(cfg remote host)}"
+ssh_bin="${RW_SSH:-ssh}"
+runs_root="$(cfg remote runs_root)"; runs_root="${runs_root:-~/rw-runs}"
+workdir_cfg="$(cfg remote workdir)"
+proxy_url="${RW_PROXY:-$(cfg remote proxy)}"; proxy_url="${proxy_url:-http://127.0.0.1:7890}"
+clash_api="${RW_CLASH_API:-$(cfg remote clash_api)}"; clash_api="${clash_api:-http://127.0.0.1:9999}"
+clash_secret="${RW_CLASH_SECRET:-}"   # never stored in the repository
+resmon_bin="${RW_RESMON:-$repo_root/workflow/skills/resmon/resmon.sh}"
+resmon_limits="${RW_RESMON_LIMITS:-$(cfg remote resmon_limits)}"
+output_dirs="${RW_OUTPUT_DIRS:-$(cfg remote output_dirs)}"; output_dirs="${output_dirs:-results output}"   # produced remotely, pulled back, never synced forward
+# Per-project namespace on the shared host: runs, tmux sessions and the code mirror never collide across projects.
+runs_dir="${RW_RUNS_DIR:-$runs_root/$slug}"
+workdir_default="${RW_WORKDIR:-${workdir_cfg:-~/$slug}}"
+sess_prefix="rw-$slug-"
+fail_re='Traceback|Error|ERROR|Exception|FAILED|Killed|OOM|[Oo]ut of memory|Segmentation fault|core dumped|NaN'
+
+usage() {
+  cat <<'EOF'
+usage:
+  remote sync [--dry-run]                                         rsync this working tree to the host (incremental, stamps provenance)
+  remote run <run_id> [--no-sync] [--no-resmon] [--proxy] -- <command...>
+                                                                sync, start a detached job (tmux) with log + exit marker,
+                                                                then start a resmon resource monitor on its process tree
+  remote watch <run_id> [--progress RE] [--lines N|+1] [--no-pull] Monitor event stream; on exit pulls output dirs back
+  remote pull [--dry-run]                                         rsync the host's output dirs back to the same dirs here
+  remote stop <run_id> [--grace SECONDS]                           Ctrl-C, then kill after grace (default 15)
+  remote logs <run_id> [N]                                         last N log lines (default 40)
+  remote status                                                    host, GPUs, this project's running jobs
+  remote check                                                     ssh, tmux, GPU, proxy egress, Clash API
+  remote proxy groups | nodes <group> | use <group> <node> | delay <node> [url] | test
+
+Config: project.yaml (project.slug, remote.*). Environment overrides:
+  RW_CONFIG RW_PROJECT_SLUG RW_HOST RW_SSH RW_RUNS_DIR RW_WORKDIR RW_PROXY RW_CLASH_API RW_CLASH_SECRET
+  RW_OUTPUT_DIRS RW_RESMON RW_RESMON_LIMITS
+EOF
+}
+
+die() { printf 'error: %s\n' "$1" >&2; exit "${2:-2}"; }
+
+# remote INTERPRETER SCRIPT ARGS... : SCRIPT is fed on stdin, ARGS are shell-quoted.
+remote() {
+  local interp="$1" script="$2"; shift 2
+  local cmd="$interp" a
+  for a in "$@"; do cmd+=" $(printf '%q' "$a")"; done
+  "$ssh_bin" -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+    "$host" "$cmd" <<<"$script"
+}
+
+check_run_id() {
+  [[ -n "${1:-}" ]] || die "run_id is required"
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "run_id may only contain letters, digits, '.', '_' and '-': $1"
+}
+
+read -r -d '' REMOTE_PRELUDE <<'EOF' || true
+expand_home() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s' "$HOME/${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
+EOF
+
+read -r -d '' RUN_REMOTE <<'EOF' || true
+set -euo pipefail
+runs="$(expand_home "$1")"; run_id="$2"; workdir="$(expand_home "$3")"; use_proxy="$4"; proxy="$5"; cmd="$6"; expect_src="${7:-}"
+command -v tmux >/dev/null || { echo "error: tmux not found on $(hostname)" >&2; exit 3; }
+sess="$sess_prefix$run_id"; dir="$runs/$run_id"
+if tmux has-session -t "=$sess" 2>/dev/null; then echo "error: session $sess is already running" >&2; exit 4; fi
+if [ -e "$dir/run.log" ]; then echo "error: $dir/run.log already exists; use a new run_id" >&2; exit 4; fi
+mkdir -p "$dir"
+{
+  echo '#!/usr/bin/env bash'
+  printf 'echo $$ > %q\n' "$dir/pid"
+  printf 'export RW_RUN_ID=%q\n' "$run_id"
+  printf 'cd %q || { echo "__RW_EXIT__ run_id=%s code=97 reason=bad_workdir"; exit 97; }\n' "$workdir" "$run_id"
+  if [ "$use_proxy" = 1 ]; then
+    for v in http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY; do printf 'export %s=%q\n' "$v" "$proxy"; done
+    echo 'export no_proxy=localhost,127.0.0.1 NO_PROXY=localhost,127.0.0.1'
+  fi
+  printf 'echo "__RW_START__ run_id=%s host=$(hostname) pid=$$ $(cat .rw-sync 2>/dev/null || echo src=unsynced) at=$(date -Is)"\n' "$run_id"
+  echo '('
+  printf '%s\n' "$cmd"
+  echo ')'
+  echo 'code=$?'
+  printf 'echo "__RW_EXIT__ run_id=%s code=$code at=$(date -Is)"\n' "$run_id"
+  echo 'exit $code'
+} > "$dir/job.sh"
+printf '%s\n' "$cmd" > "$dir/cmd.txt"
+tmux new-session -d -s "$sess" "bash $(printf %q "$dir/job.sh") >> $(printf %q "$dir/run.log") 2>&1"
+for _ in $(seq 50); do [ -s "$dir/pid" ] && break; sleep 0.1; done
+stamp="$(cat "$workdir/.rw-sync" 2>/dev/null || echo src=unsynced)"
+echo "started run_id=$run_id session=$sess log=$dir/run.log pidfile=$dir/pid ${stamp%% synced_at=*}"
+if [ -n "$expect_src" ]; then
+  case "$stamp" in "$expect_src"*) ;; *) echo "warning: remote code differs from this working tree ($expect_src); drop --no-sync or run scripts/remote sync" >&2 ;; esac
+fi
+EOF
+
+read -r -d '' STAMP_REMOTE <<'EOF' || true
+workdir="$(expand_home "$1")"
+printf '%s synced_at=%s\n' "$2" "$(date -Is)" > "$workdir/.rw-sync"
+EOF
+
+read -r -d '' WATCH_REMOTE <<'EOF' || true
+set -uo pipefail
+runs="$(expand_home "$1")"; run_id="$2"; lines="$3"; pattern="$4"
+sess="$sess_prefix$run_id"; log="$runs/$run_id/run.log"
+if [ ! -f "$log" ]; then echo "__RW_WATCH_ERROR__ run_id=$run_id reason=no_log path=$log"; exit 3; fi
+tail -n "$lines" -F "$log" 2>/dev/null > >(grep -E --line-buffered -- "$pattern") &
+tail_pid=$!
+while tmux has-session -t "=$sess" 2>/dev/null; do sleep 5; done
+sleep 2
+kill "$tail_pid" 2>/dev/null
+wait "$tail_pid" 2>/dev/null
+sleep 0.5
+last="$(grep -E '__RW_(EXIT|STOPPED)__' "$log" | tail -n 1)"
+if [ -n "$last" ]; then
+  echo "__RW_DONE__ run_id=$run_id last=\"$last\""
+else
+  echo "__RW_DONE__ run_id=$run_id last=\"__RW_GONE__ session ended without exit marker\""
+fi
+EOF
+
+read -r -d '' STOP_REMOTE <<'EOF' || true
+set -uo pipefail
+runs="$(expand_home "$1")"; run_id="$2"; grace="$3"
+sess="$sess_prefix$run_id"; log="$runs/$run_id/run.log"
+if ! tmux has-session -t "=$sess" 2>/dev/null; then echo "not running: $sess"; exit 0; fi
+echo "__RW_STOPPED__ run_id=$run_id requested_at=$(date -Is)" >> "$log"
+tmux send-keys -t "=$sess:" C-c
+for _ in $(seq "$grace"); do tmux has-session -t "=$sess" 2>/dev/null || break; sleep 1; done
+if tmux has-session -t "=$sess" 2>/dev/null; then tmux kill-session -t "=$sess"; how=killed; else how=interrupted; fi
+echo "stopped $sess ($how)"
+EOF
+
+read -r -d '' LOGS_REMOTE <<'EOF' || true
+runs="$(expand_home "$1")"; log="$runs/$2/run.log"
+[ -f "$log" ] || { echo "error: no log at $log" >&2; exit 3; }
+tail -n "$3" "$log"
+EOF
+
+read -r -d '' STATUS_REMOTE <<'EOF' || true
+runs="$(expand_home "$1")"
+echo "host=$(hostname) at=$(date -Is) load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+if command -v nvidia-smi >/dev/null; then
+  nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total --format=csv,noheader | sed 's/^/gpu /'
+else
+  echo "gpu: nvidia-smi not found"
+fi
+found=0
+for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep -- "^$sess_prefix"); do
+  found=1; id="${s#"$sess_prefix"}"
+  echo "running $id | $(tail -n 1 "$runs/$id/run.log" 2>/dev/null)"
+done
+[ "$found" = 1 ] || echo "running: none"
+EOF
+
+read -r -d '' CHECK_REMOTE <<'EOF' || true
+proxy="$1"
+echo "ssh: ok ($(hostname))"
+command -v tmux >/dev/null && echo "tmux: $(tmux -V)" || echo "tmux: MISSING"
+command -v python3 >/dev/null && echo "python3: $(python3 --version 2>&1)" || echo "python3: MISSING (needed for proxy commands)"
+command -v nvidia-smi >/dev/null && echo "gpu: $(nvidia-smi --query-gpu=name --format=csv,noheader | paste -sd, -)" || echo "gpu: nvidia-smi not found"
+if command -v curl >/dev/null; then
+  r="$(curl -sS -m 10 -x "$proxy" -o /dev/null -w '%{http_code} %{time_total}s' https://www.gstatic.com/generate_204 2>&1)" || true
+  echo "proxy egress via $proxy (http): $r"
+  socks="socks5h://${proxy#*://}"
+  r="$(curl -sS -m 10 -x "$socks" -o /dev/null -w '%{http_code} %{time_total}s' https://www.gstatic.com/generate_204 2>&1)" || true
+  echo "proxy egress via $socks (socks5, 204 means mixed-port): $r"
+else
+  echo "curl: MISSING"
+fi
+EOF
+
+read -r -d '' CLASH_PY <<'EOF' || true
+import json, sys, urllib.request, urllib.parse, urllib.error
+api, secret, action, *rest = sys.argv[1:]
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def call(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(api.rstrip('/') + path, data=data, method=method)
+    if secret:
+        req.add_header('Authorization', 'Bearer ' + secret)
+    if data is not None:
+        req.add_header('Content-Type', 'application/json')
+    with opener.open(req, timeout=15) as r:
+        raw = r.read()
+    return json.loads(raw) if raw.strip() else None
+q = lambda s: urllib.parse.quote(s, safe='')
+try:
+    if action == 'version':
+        print('clash api:', call('GET', '/version'))
+    elif action == 'groups':
+        for name, p in call('GET', '/proxies')['proxies'].items():
+            if p.get('type') == 'Selector':
+                print('%s\tnow=%s\toptions=%d' % (name, p.get('now'), len(p.get('all', []))))
+    elif action == 'nodes':
+        g = call('GET', '/proxies/' + q(rest[0]))
+        for n in g.get('all', []):
+            print(('* ' if n == g.get('now') else '  ') + n)
+    elif action == 'use':
+        group, node = rest
+        before = call('GET', '/proxies/' + q(group)).get('now')
+        call('PUT', '/proxies/' + q(group), {'name': node})
+        after = call('GET', '/proxies/' + q(group)).get('now')
+        print('group=%s before=%s after=%s' % (group, before, after))
+        if after != node:
+            sys.exit(5)
+    elif action == 'delay':
+        node = rest[0]
+        url = rest[1] if len(rest) > 1 else 'http://www.gstatic.com/generate_204'
+        r = call('GET', '/proxies/%s/delay?timeout=5000&url=%s' % (q(node), q(url)))
+        print('node=%s delay_ms=%s' % (node, r.get('delay')))
+    else:
+        print('error: unknown proxy action: ' + action, file=sys.stderr); sys.exit(2)
+except urllib.error.HTTPError as e:
+    print('error: clash api %s %s' % (e.code, e.read().decode(errors='replace').strip()), file=sys.stderr); sys.exit(6)
+except urllib.error.URLError as e:
+    print('error: clash api unreachable at %s: %s' % (api, e.reason), file=sys.stderr); sys.exit(6)
+EOF
+
+with_prelude() { printf '%s\nsess_prefix=%q\n%s\n' "$REMOTE_PRELUDE" "$sess_prefix" "$1"; }
+
+cmd_run() {
+  local run_id="${1:-}"; shift || true
+  check_run_id "$run_id"
+  local workdir="$workdir_default" use_proxy=0 do_sync=1 do_resmon=1
+  while (($#)); do
+    case "$1" in
+      --workdir) (($# >= 2)) || die "--workdir needs a value"; workdir="$2"; do_sync=0; shift 2 ;;
+      --no-sync) do_sync=0; shift ;;
+      --no-resmon) do_resmon=0; shift ;;
+      --proxy) use_proxy=1; shift ;;
+      --) shift; break ;;
+      *) die "unknown run option: $1 (put the command after --)" ;;
+    esac
+  done
+  (($#)) || die "command is required after --"
+  local expect=""
+  if ((do_sync)); then cmd_sync >&2; fi
+  [[ "$workdir" != "$workdir_default" ]] || expect="$(fingerprint)"
+  local started pidfile
+  started="$(remote "bash -s --" "$(with_prelude "$RUN_REMOTE")" "$runs_dir" "$run_id" "$workdir" "$use_proxy" "$proxy_url" "$*" "$expect")" || exit $?
+  printf '%s\n' "$started"
+  printf 'next (Monitor tool): scripts/remote watch %s [--progress RE]   # progress, errors, exit, pull results\n' "$run_id" >&2
+  ((do_resmon)) || return 0
+  pidfile="$(printf '%s\n' "$started" | sed -n 's/.* pidfile=\([^ ]*\).*/\1/p')"
+  if [[ ! -x "$resmon_bin" ]]; then
+    printf 'warning: resmon not found at %s; job runs without a resource monitor\n' "$resmon_bin" >&2; return 0
+  fi
+  local rargs=(start "$host" --task-id "$run_id" --pid-file "$pidfile") handle
+  [[ -z "$resmon_limits" ]] || rargs+=(--limit "$resmon_limits")
+  if handle="$("$resmon_bin" "${rargs[@]}")"; then
+    printf 'resmon: %s\n' "$(printf '%s' "$handle" | sed -n 's/.*"monitor_id":"\([^"]*\)".*/monitor_id=\1/p')"
+    printf 'next (background Bash): %s wait %s   # resources: memory, CPU, disk, OOM\n' "${resmon_bin#"$repo_root"/}" "$run_id" >&2
+  else
+    printf 'warning: resmon failed to start; job runs without a resource monitor\n' >&2
+  fi
+}
+
+# fingerprint: one line describing exactly what code is in this working tree (commit + uncommitted state)
+fingerprint() {
+  if ! git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1; then echo "src=$(hostname -s) commit=none"; return; fi
+  local head dirty tree
+  head="$(git -C "$repo_root" rev-parse --short=12 HEAD 2>/dev/null || echo none)"
+  if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then dirty=yes; else dirty=no; fi
+  tree="$(
+    cd "$repo_root"
+    git rev-parse HEAD 2>/dev/null
+    git diff HEAD --binary 2>/dev/null
+    git ls-files -z --others --exclude-standard | while IFS= read -r -d '' f; do printf '%s %s\n' "$f" "$(git hash-object -- "$f")"; done
+  )"
+  tree="$(printf '%s' "$tree" | git hash-object --stdin)"
+  echo "src=$(hostname -s) commit=$head dirty=$dirty tree=${tree:0:12}"
+}
+
+rsync_target() {
+  local w="$workdir_default"
+  case "$w" in "~") w="." ;; "~/"*) w="${w#\~/}" ;; esac
+  printf '%s:%s/' "$host" "$w"
+}
+
+cmd_sync() {
+  local dry=0 tmp_rules
+  tmp_rules="$(mktemp)"
+  [[ "${1:-}" != "--dry-run" ]] || dry=1
+  command -v rsync >/dev/null || die "rsync not found on this machine" 1
+  local args=(-rlptzc --delete-after --itemize-changes --exclude=/.git/ --exclude=/.rw-sync --filter=':- .gitignore'
+              -e "$ssh_bin -o BatchMode=yes -o ConnectTimeout=10")
+  # Root .gitignore also as global excludes, so ignored paths on the host (outputs, data) are never deleted,
+  # even before the receiver has its own copy of .gitignore (first sync, --dry-run).
+  local ignore_rules="$tmp_rules"
+  if [[ -f "$repo_root/.gitignore" ]]; then
+    grep -v -E '^[[:space:]]*(#|!|$)' "$repo_root/.gitignore" > "$ignore_rules" || true
+  else
+    : > "$ignore_rules"
+  fi
+  args+=(--exclude-from="$ignore_rules")
+  local d; for d in $output_dirs; do args+=(--exclude="/$d/"); done
+  if ((dry)); then
+    rsync -n "${args[@]}" "$repo_root/" "$(rsync_target)"; local rc=$?
+    rm -f -- "$tmp_rules"; return "$rc"
+  fi
+  local fp out n
+  fp="$(fingerprint)"
+  out="$(rsync "${args[@]}" "$repo_root/" "$(rsync_target)")" || { rm -f -- "$tmp_rules"; die "rsync to $host failed" 1; }
+  rm -f -- "$tmp_rules"
+  n="$(printf '%s\n' "$out" | grep -cE '^(<|\*deleting|c)' || true)"   # content transfers + deletions only
+  remote "bash -s --" "$(with_prelude "$STAMP_REMOTE")" "$workdir_default" "$fp"
+  echo "synced $n change(s) -> $host:$workdir_default ($fp)"
+}
+
+read -r -d '' EXISTING_REMOTE <<'EOF' || true
+w="$(expand_home "$1")"; shift
+for d in "$@"; do [ -d "$w/$d" ] && echo "$d"; done; true
+EOF
+
+cmd_pull() {
+  local dry=""   # scalar, not an array: macOS bash 3.2 errors on empty "${arr[@]}" under set -u
+  [[ "${1:-}" != "--dry-run" ]] || dry="-n"
+  local w="$workdir_default" dirs d out n=0 got=""
+  case "$w" in "~") w="." ;; "~/"*) w="${w#\~/}" ;; esac
+  # shellcheck disable=SC2086
+  dirs="$(remote "bash -s --" "$(with_prelude "$EXISTING_REMOTE")" "$workdir_default" $output_dirs)" || die "cannot reach $host" 1
+  for d in $dirs; do
+    mkdir -p -- "$repo_root/$d"
+    out="$(rsync ${dry:+"$dry"} -rlptz --itemize-changes -e "$ssh_bin -o BatchMode=yes -o ConnectTimeout=10" \
+      "$host:$w/$d/" "$repo_root/$d/")" || die "rsync of $d/ from $host failed" 1
+    [[ -z "$dry" ]] || printf '%s\n' "$out" | sed "s|^|$d/: |"
+    n=$((n + $(printf '%s\n' "$out" | grep -c '^>f' || true)))
+    got+="$d/ "
+  done
+  if [[ -z "$got" ]]; then echo "pulled nothing: none of ($output_dirs) exists on $host"; else echo "pulled $n file(s) <- $host: $got"; fi
+}
+
+cmd_watch() {
+  local run_id="${1:-}"; shift || true
+  check_run_id "$run_id"
+  local lines="+1" progress="" pull=1
+  while (($#)); do
+    case "$1" in
+      --no-pull) pull=0; shift ;;
+      --progress) (($# >= 2)) || die "--progress needs a regex"; progress="$2"; shift 2 ;;
+      --lines) (($# >= 2)) || die "--lines needs a value"; lines="$2"; shift 2 ;;
+      *) die "unknown watch option: $1" ;;
+    esac
+  done
+  local pattern="__RW_|$fail_re"
+  [[ -z "$progress" ]] || pattern+="|$progress"
+  local rc=0
+  remote "bash -s --" "$(with_prelude "$WATCH_REMOTE")" "$runs_dir" "$run_id" "$lines" "$pattern" || rc=$?
+  if ((rc == 255)); then
+    printf '__RW_WATCH_LOST__ run_id=%s host=%s reason=ssh_failed; run "scripts/remote check", then re-arm with --lines 50\n' "$run_id" "$host"
+  elif ((rc != 0)); then
+    printf '__RW_WATCH_ERROR__ run_id=%s code=%s\n' "$run_id" "$rc"
+  elif ((pull)); then
+    printf '__RW_PULLED__ run_id=%s %s\n' "$run_id" "$(cmd_pull 2>&1 | tail -n 1)"
+  fi
+  return "$rc"
+}
+
+cmd_stop() {
+  local run_id="${1:-}"; shift || true
+  check_run_id "$run_id"
+  local grace=15
+  if [[ "${1:-}" == "--grace" ]]; then grace="${2:-}"; fi
+  [[ "$grace" =~ ^[0-9]+$ ]] || die "--grace must be a non-negative integer"
+  remote "bash -s --" "$(with_prelude "$STOP_REMOTE")" "$runs_dir" "$run_id" "$grace"
+}
+
+cmd_proxy() {
+  local action="${1:-}"; shift || true
+  case "$action" in
+    test) remote "bash -s --" "$CHECK_REMOTE" "$proxy_url" | grep -E '^(ssh|proxy)' ;;
+    groups|version) remote "python3 -" "$CLASH_PY" "$clash_api" "$clash_secret" "$action" ;;
+    nodes|delay) (($# >= 1)) || die "proxy $action needs an argument"
+      remote "python3 -" "$CLASH_PY" "$clash_api" "$clash_secret" "$action" "$@" ;;
+    use) (($# == 2)) || die "usage: remote proxy use <group> <node>"
+      remote "python3 -" "$CLASH_PY" "$clash_api" "$clash_secret" use "$1" "$2" ;;
+    *) die "usage: remote proxy groups | nodes <group> | use <group> <node> | delay <node> [url] | test" ;;
+  esac
+}
+
+require_project() {
+  [[ "$slug" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "project.slug is not set in project.yaml; initialize the project first (/project-init)" 1
+}
+
+require_host() {
+  [[ -n "$host" ]] || die "remote.host is not set in project.yaml (an ssh alias from ~/.ssh/config)" 1
+}
+
+sub="${1:-}"; shift || true
+case "$sub" in sync|pull|run|watch|stop|logs|status) require_host; require_project ;; check|proxy) require_host ;; esac
+case "$sub" in
+  sync) cmd_sync "$@" ;;
+  pull) cmd_pull "$@" ;;
+  run) cmd_run "$@" ;;
+  watch) cmd_watch "$@" ;;
+  stop) cmd_stop "$@" ;;
+  proxy) cmd_proxy "$@" ;;
+  logs) check_run_id "${1:-}"; n="${2:-40}"; [[ "$n" =~ ^[0-9]+$ ]] || die "N must be an integer"
+    remote "bash -s --" "$(with_prelude "$LOGS_REMOTE")" "$runs_dir" "$1" "$n" ;;
+  status) remote "bash -s --" "$(with_prelude "$STATUS_REMOTE")" "$runs_dir" ;;
+  check)
+    remote "bash -s --" "$CHECK_REMOTE" "$proxy_url" || die "cannot reach $host over ssh" 1
+    remote "python3 -" "$CLASH_PY" "$clash_api" "$clash_secret" version || true ;;
+  -h|--help|help|"") usage ;;
+  *) usage >&2; exit 2 ;;
+esac

@@ -1,0 +1,20 @@
+# Project identity and deployment config. Project-owned; filled in by /project-init.
+# Format: a two-level map of scalars only (read by scripts/lib/project-config.sh); `null` means unset.
+# Host names, ports and paths are deployment config: never cite them as Protocol, Decision or Evidence semantics.
+
+project:
+  name: null                        # human-readable project name
+  slug: null                        # [a-z0-9-]; null = uninitialized template; namespaces remote dirs and tmux sessions
+
+template:
+  version: null                     # workflow version this project was initialized from (workflow/lock.yaml)
+  commit: null                      # template commit last installed or updated
+
+remote:
+  host: null                        # ssh alias from ~/.ssh/config; required by scripts/remote
+  workdir: null                     # code mirror on the host; null = ~/<slug>
+  runs_root: ~/rw-runs              # job directories: <runs_root>/<slug>/<run_id>/
+  output_dirs: results output       # written on the host, pulled back, never synced forward
+  proxy: http://127.0.0.1:7890      # host-local proxy (mixed-port: HTTP and SOCKS5)
+  clash_api: http://127.0.0.1:9999  # Clash external-controller on the host
+  resmon_limits: null               # e.g. task_mem=20GiB,disk=90%; null = resmon defaults

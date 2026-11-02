@@ -1,0 +1,9 @@
+# Large run outputs (checkpoints, predictions). results/ stays tracked and can be cited as Evidence.
+/output/
+
+# Local tool state
+.claude/settings.local.json
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
