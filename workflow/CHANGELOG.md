@@ -2,6 +2,10 @@
 
 Template-level changes. Projects read this when merging template updates (see `workflow/WORKFLOW.md` §2). Entries marked **Action** need project-side work after the merge.
 
+## Unreleased
+
+- Fix: `tests/test-remote.sh` now unsets `TMUX` / `TMUX_PANE` before starting its private tmux server. When the test ran inside a tmux pane, `$TMUX` took precedence over `TMUX_TMPDIR`, so its jobs started on the caller's real tmux server and its cleanup `tmux kill-server` killed that server and every session on it.
+
 ## 0.6.0 — 2026-11-02
 
 First public release as `research-init` (MIT).

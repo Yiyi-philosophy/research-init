@@ -6,6 +6,9 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 remote_bin="$repo_root/scripts/remote"
 tmp="$(mktemp -d)"
+# Private tmux server. $TMUX (set when this test runs inside a tmux pane) takes precedence over
+# TMUX_TMPDIR, so drop it too; otherwise the cleanup below would kill the caller's real server.
+unset TMUX TMUX_PANE
 export TMUX_TMPDIR="$tmp/tmux"; mkdir -p "$TMUX_TMPDIR"
 clash_pid=""
 cleanup() {
