@@ -2,8 +2,15 @@
 
 Template-level changes. Projects read this when merging template updates (see `workflow/WORKFLOW.md` §2). Entries marked **Action** need project-side work after the merge.
 
-## Unreleased
+## 0.7.0 — 2026-11-17
 
+Autonomous engineering by default; engineering review separated from research review; a short current-state view.
+
+- `AGENTS.md`: a short **Default mode** section. Within an authorized engineering scope the agent implements, tests, runs an independent engineering review, fixes and commits without asking at each step, and asks the researcher only at the listed gates (scientific choices, frozen or accepted records, more authority, the review limit, safety).
+- `WORKFLOW.md` §3: the autonomous engineering loop and its escalation rules; approving a design is not authorizing its execution. §9: engineering review versus research review (table); the agent-invoked review limit (at most 3 automated reviewer calls per review cycle, a 4th only with the researcher's explicit authorization in chat), now also defined for engineering reviews. §5: `docs/CURRENT.md` is a 5–10 KB entry view, not a log; history goes to dated archives.
+- New skill `engineering-review`: when to call the Codex CLI (or another automated reviewer) read-only on a nontrivial code change, how to triage and fix findings, how to record the call in the commit message, and what to do when no reviewer is available.
+- `research-review`: the automated-reviewer limit procedure; `invoked_by` / `agent_call` in `workflow/templates/review.md`; points routine changes to `engineering-review`.
+- `scripts/check-workflow.sh` warns when `docs/CURRENT.md` exceeds 12 KB.
 - Fix: `tests/test-remote.sh` now unsets `TMUX` / `TMUX_PANE` before starting its private tmux server. When the test ran inside a tmux pane, `$TMUX` took precedence over `TMUX_TMPDIR`, so its jobs started on the caller's real tmux server and its cleanup `tmux kill-server` killed that server and every session on it.
 
 ## 0.6.0 — 2026-11-02

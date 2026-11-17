@@ -7,6 +7,8 @@ description: Run and record a formal research review or a closure review of a re
 
 A review is an immutable governance record of an independent check. It is not Evidence and not a Decision: it records judgment and governance state, and it cannot replace experimental results or the researcher's choice of direction.
 
+This skill is for research artifacts (Proposal, Protocol, Experiment, Evidence). Routine code and documentation changes get an engineering review instead (skill `engineering-review`), recorded in the commit, not here.
+
 ## What a reviewer checks
 
 - Violations of a frozen contract.
@@ -35,6 +37,16 @@ After the smallest compatible fixes have been made:
 3. Report any new `BLOCKER` or `IMPORTANT` introduced by the fixes.
 4. Do not reopen accepted Decisions and do not redesign the artifact. A new direction-level concern is recorded separately and goes through Decision / Protocol.
 5. Update `meta/status.yaml` and `docs/CURRENT.md`.
+
+## Automated reviewer calls (limit)
+
+Applies when the agent itself runs an automated external reviewer such as the local Codex CLI (`workflow/WORKFLOW.md` §9).
+
+1. Before each call, count the completed agent-invoked calls in the current cycle, from the cycle's formal review onward: the files in `research/reviews/<artifact>/` with `invoked_by: agent` **plus** any completed call whose review was discarded (report every such call to the researcher, so it stays countable). Files alone can undercount. A cycle ends at the first passing review (no open `BLOCKER` or `IMPORTANT`).
+2. Once the researcher has requested the review, up to 3 calls per cycle need no further permission; the limit never authorizes starting a review or any other model call. Before a 4th (or any later) call, stop: report the open findings and ask the researcher in chat. Call again only after their explicit authorization, for the number of calls they state (one if none).
+3. Record `invoked_by: agent` and `agent_call: N` in the review's front matter; for calls after the third, also `authorized_by: researcher (YYYY-MM-DD, chat)`.
+4. A call that fails before producing a review does not count; report it. A completed call counts even if its review is discarded.
+5. Reviews the researcher runs or pastes (`invoked_by: human`) do not count.
 
 ## Next transition after closure
 

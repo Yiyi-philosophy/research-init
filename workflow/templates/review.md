@@ -3,6 +3,8 @@ artifact: research/PROTOCOL.md
 reviewed_commit: <commit>
 # baseline_review: research/reviews/<artifact>/<YYYYMMDD-artifact-reviewer-rN>.md   # required when review_type is closure_review
 reviewer: <reviewer>
+invoked_by: agent # agent | human (agent: counts toward the 3-call limit per review cycle, WORKFLOW.md §9)
+agent_call: 1 # only when invoked_by: agent; number of this call within the review cycle
 review_type: formal_research_review # formal_research_review | closure_review
 round: 1
 date: "YYYY-MM-DD"

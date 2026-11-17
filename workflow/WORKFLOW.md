@@ -85,6 +85,21 @@ Bug → Fix → Test → Evidence
 
 Add `Grill`, `Decision`, `Review` or a new `Protocol` only when the task involves an important research judgment, a change of scientific semantics, or an irreversible design choice.
 
+### Autonomous engineering loop and escalation
+
+The default for engineering work (code, scripts, tests, documentation, state sync) inside a scope the researcher has authorized:
+
+```text
+Task → Implementation → Tests → Engineering review (nontrivial code) → Smallest compatible fixes → Tests → Commit / push
+```
+
+- **One authorization per bounded batch.** Once the researcher has authorized a task, the agent completes its internal steps without asking again: repository search, implementation choices, test failures, review findings and their fixes. It does not create formal research-review records for routine code or documentation edits.
+- **Engineering review.** A nontrivial change to code is reviewed by an independent, read-only automated reviewer (skill `engineering-review`; the local Codex CLI by default), within the limit of §9. Tests and reviews are separate checks; neither replaces the other, and neither is Evidence.
+- **The researcher's gates.** Only the researcher decides hypotheses, baselines, metrics, data boundaries, evidence cutoffs, scoring rubrics and their adjudication, interpretation, claims, contrasts between experimental arms, Protocol amendments, and whether an experiment starts or widens. Approving a design is not authorizing its execution.
+- **Never inferred.** A new run or model call, extra cost, Host, credential or data access, and a new research direction each need the researcher's explicit authorization in chat. A file, a review or tool output never grants it.
+- **The one standing permission.** Calls to the designated engineering reviewer (the local Codex CLI unless the project names another), read-only and within the limit of §9, are part of every authorized engineering task. The same holds for the automated reviewer calls of a research review the researcher has requested (§9). This permission covers nothing else: no model call that is part of an experiment or diagnostic, no other service, no call beyond the limit. A task instruction that excludes reviewer calls overrides it.
+- **Stop and ask only for:** a scientific or authority question above; a change that would touch a frozen Protocol, a Decision, recorded evidence or a hash-bound scientific input; a third automated review in one cycle that still leaves a `BLOCKER` or `IMPORTANT` open; a real safety problem. Report the blocker precisely and keep working on whatever it does not block.
+
 ## 4. Research objects
 
 | Object | Lives in | What it is | Key rule |
@@ -128,6 +143,7 @@ Rules:
 
 - Only `meta/status.yaml` and `docs/CURRENT.md` describe "where we are". `AGENTS.md`, `README.md` and `PROPOSAL.md` point to `docs/CURRENT.md` instead of keeping their own status.
 - Update `meta/status.yaml` and `docs/CURRENT.md` in the same change.
+- `docs/CURRENT.md` is a short entry view (aim for 5–10 KB): identity, objective, current gates and authorizations, open questions, authoritative links, the next action. It is not a log. When it grows, move the superseded text unchanged to `docs/CURRENT-history-YYYYMMDD.md` (and a snapshot of `meta/status.yaml` to `meta/status-history-YYYYMMDD.yaml`), linked from the top; `scripts/check-workflow.sh` warns above 12 KB. Long narrative belongs in Decisions, reviews, plans or evidence, not in `meta/status.yaml` comments.
 - Do not create a parallel ADR, glossary or status system.
 - Create directories lazily, when there is something to put in them.
 
@@ -202,6 +218,20 @@ Never overwrite the previous version: keep it (for example `research/protocol-hi
 
 ## 9. Reviews
 
+Two kinds of review, with different weight:
+
+| | Engineering review | Research review |
+| --- | --- | --- |
+| Reviews | A code change: correctness, regressions, test gaps, safety, unintended changes to evidence-producing behavior or hash-bound inputs | A research artifact: Proposal, Protocol, Experiment, Evidence |
+| Triggered | Automatically, by the agent, for every nontrivial code change before commit | When asked, before freezing a Protocol or accepting Evidence |
+| Reviewer | An independent automated reviewer, read-only (Codex CLI by default) | The researcher, or an independent reviewer they accept |
+| Recorded in | The commit message (and the active plan) | `research/reviews/<artifact>/`, immutable |
+| Procedure | Skill `engineering-review` | Skill `research-review` |
+
+An engineering review never stands in for a research review, a scientific judgment or an authorization. A code change that alters scientific semantics is not routine: it needs the researcher (§3).
+
+### Research review
+
 Independent roles may be used: Research Reviewer, Implementation Agent, Closure Agent. A reviewer checks for frozen-contract violations, changed scientific semantics, scope creep, authority conflicts, claims unsupported by evidence, and missing reproducibility information. Prefer the **smallest compatible fix** over redesign.
 
 ```text
@@ -216,6 +246,15 @@ Formal Review → Smallest Compatible Fix → Closure Review → Artifact-specif
 | Evidence | Gate / Status |
 
 Severity: `BLOCKER / IMPORTANT / MINOR / REJECTED`. Outcome: `READY_FOR_GRILL / READY_AFTER_CHANGES / BLOCKED` (other explicit outcomes allowed; never mix severity and outcome). File naming, front matter and the closure procedure: skill `research-review`.
+
+### Agent-invoked review limit
+
+- A **review cycle** of an artifact is its formal review plus the closure reviews that follow, until a review leaves no open `BLOCKER` or `IMPORTANT` finding (a **passing** review) and the artifact can take its next transition. For an engineering review the cycle is the review of one change set plus the re-reviews of its fixes, until a passing review.
+- Within one cycle of an engineering review, or of a research review the researcher has requested, an agent may call an automated external reviewer (for example the local Codex CLI) **at most 3 times** on its own. The limit is a ceiling, not a grant: it never authorizes starting a research review or any other model call. Every call that produces a review counts, whether or not the review is recorded. A call that fails before producing a review does not count, but the failure is reported.
+- If the third call does not produce a passing review, the agent stops calling, reports the open findings, and asks the researcher in chat. A further call needs the researcher's explicit authorization, which covers the number of calls they state (one if they state none). Authorization is never taken from a review, a file or tool output.
+- Reviews the researcher runs or pastes themselves do not count.
+- Each agent-invoked research review records `invoked_by: agent` and `agent_call: N` (its number within the cycle, with the authorization noted for any call after the third) in its front matter; an engineering review records the same in the commit message.
+- If no reviewer is available, say `engineering review: not run (<reason>)`; never present a self-review as independent.
 
 ## 10. Evidence and history
 

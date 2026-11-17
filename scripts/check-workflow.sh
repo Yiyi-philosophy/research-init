@@ -37,6 +37,10 @@ else
   for f in README.md docs/CURRENT.md research/PROPOSAL.md; do
     [[ -f "$f" ]] && grep -q 'rw:template' "$f" && fail "$f still contains the template placeholder (rw:template)"
   done
+  # docs/CURRENT.md is read every session: a view of the current state, not a log (workflow/WORKFLOW.md §5)
+  if [[ -f docs/CURRENT.md ]] && (( $(wc -c < docs/CURRENT.md) > 12288 )); then
+    warn "docs/CURRENT.md is $(wc -c < docs/CURRENT.md) bytes (> 12 KB): move superseded detail to docs/CURRENT-history-YYYYMMDD.md"
+  fi
 fi
 
 # 2. State references in meta/status.yaml ------------------------------------------------------

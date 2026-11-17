@@ -7,6 +7,7 @@
 | `project-init` | local | user only: `/project-init` | Turn a fresh template clone into a project; deletes itself when done |
 | `remote-run` | local | automatic | Launch and supervise long jobs on the remote host (`scripts/remote` + Monitor `watch` + `resmon`) |
 | `resmon` | researcher's own tool | automatic | Background resource guard for one job; used by `remote-run` |
+| `engineering-review` | local | automatic | Independent read-only review of a nontrivial code change (Codex CLI), fixes, 3-call limit |
 | `research-review` | local | automatic or `/research-review` | Write formal and closure reviews in `research/reviews/<artifact>/` |
 | `record-decision` | local | automatic or `/record-decision` | Record or supersede a researcher decision, amend a frozen Protocol |
 | `grill-with-docs` | vendored, modified | user only: `/grill-with-docs` | Interview the researcher and record outcomes as they resolve |

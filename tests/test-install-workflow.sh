@@ -43,6 +43,14 @@ grep -q 'project-init' <<<"$out" || fail "next steps not printed"
 [[ "$(cfg "$new" template commit)" == "$head" ]] || fail "init overwrote the template commit"
 grep -q '^# New Study$' "$new/README.md" || fail "project README not written"
 (cd "$new" && tests/run.sh >/dev/null 2>&1) || fail "tests do not pass inside the new project"
+[[ -L "$new/.claude/skills/engineering-review" ]] || fail "engineering-review skill not linked"
+# docs/CURRENT.md over 12 KB is a warning, never a failure
+cp "$new/docs/CURRENT.md" "$tmp/current.bak"
+head -c 13000 /dev/zero | tr '\0' 'x' >> "$new/docs/CURRENT.md"
+out="$("$new/scripts/check-workflow.sh")" || fail "an oversized CURRENT.md failed the checks"
+grep -q 'WARN: docs/CURRENT.md is' <<<"$out" || fail "no warning for an oversized CURRENT.md"
+cp "$tmp/current.bak" "$new/docs/CURRENT.md"
+! grep -q 'WARN: docs/CURRENT.md' <<<"$("$new/scripts/check-workflow.sh")" || fail "warned for a small CURRENT.md"
 
 # 3. Update it from a newer template commit
 echo "<!-- template change -->" >> "$src/AGENTS.md"
