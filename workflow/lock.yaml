@@ -1,7 +1,7 @@
 # Template-owned. Version of this research workflow template and its pinned upstream sources.
 workflow:
   name: research-init
-  version: "0.7.0"
+  version: "0.8.0"
   repository: https://github.com/Yiyi-philosophy/research-init
   spec: workflow/WORKFLOW.md
   changelog: workflow/CHANGELOG.md

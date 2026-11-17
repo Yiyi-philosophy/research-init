@@ -7,7 +7,7 @@ description: Run and record a formal research review or a closure review of a re
 
 A review is an immutable governance record of an independent check. It is not Evidence and not a Decision: it records judgment and governance state, and it cannot replace experimental results or the researcher's choice of direction.
 
-This skill is for research artifacts (Proposal, Protocol, Experiment, Evidence). Routine code and documentation changes get an engineering review instead (skill `engineering-review`), recorded in the commit, not here.
+This skill is for research artifacts (Proposal, Protocol, Experiment, Evidence). Routine code and documentation changes get an engineering review instead (skill `engineering-review`, with its own review modes and triage), recorded in the commit, not here.
 
 ## What a reviewer checks
 

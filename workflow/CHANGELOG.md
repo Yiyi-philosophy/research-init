@@ -2,6 +2,14 @@
 
 Template-level changes. Projects read this when merging template updates (see `workflow/WORKFLOW.md` §2). Entries marked **Action** need project-side work after the merge.
 
+## 0.8.0 — 2026-11-17
+
+Risk-proportionate engineering review. Motivated by a project case in which a minimal two-call diagnostic went through five review rounds of credential-redaction hardening before the whole runner was reverted.
+
+- `engineering-review` rewritten around three parts: **mode selection** (0 skip / 1 focused / 2 standard / 3 high-assurance, chosen by the agent from purpose, exposure, reversibility, impact, deployment and lifetime, recorded in one line); one **parameterized reviewer prompt** carrying the objective, mode, scope, lifetime, trust boundaries, scientific invariants and out-of-scope items, asking for proportionate findings (failure scenario, prerequisites, impact, smallest remedy, confidence) with optional hardening kept apart; and **agent-side triage** of every finding (FIX / SIMPLIFY / REJECT / ACCEPT LIMITED RISK / ESCALATE) with a severity floor for credible credential exposure, unauthorized actions, evidence corruption and scientific-contract violations.
+- Re-reviews are closure checks of the fixes, not fresh audits; repeated findings on one defensive subsystem call for simplifying the design; a small tested fix in modes 1–2 may close without a re-review. A **passing** review now means no material `BLOCKER` or `IMPORTANT` open after triage under the task's actual acceptance criteria.
+- `WORKFLOW.md` §3 and §9, `AGENTS.md`, `workflow/skills/README.md` and `research-review` updated to match. Unchanged: the 3-call ceiling, the researcher's gates and authorization boundaries, and research-review severities.
+
 ## 0.7.0 — 2026-11-17
 
 Autonomous engineering by default; engineering review separated from research review; a short current-state view.
